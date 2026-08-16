@@ -29,40 +29,45 @@ class FCARegisterConnector(BaseConnector):
                 self.increment_request_count()
 
                 headers = {
-                    "X-Auth-Email": settings.FCA_AUTH_EMAIL,
-                    "X-Auth-Key": self.api_key
+                    "X-Auth-Email": (settings.FCA_AUTH_EMAIL or "").strip(),
+                    "X-Auth-Key": (self.api_key or "").strip(),
+                    "Content-Type": "application/json"
                 }
 
                 with self._get_client(headers=headers) as client:
-                    resp = client.get(f"{self.base_url}/Search", params={"q": customer_name})
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        firms = data.get("Data", [])
-                        if firms:
-                            firm = firms[0]
-                            frn = firm.get("FRN")
+                    # Check if customer_name is a direct FRN number
+                    if customer_name.isdigit():
+                        firm_resp = client.get(f"{self.base_url}/Firm/{customer_name}")
+                        firms = [firm_resp.json()] if firm_resp.status_code == 200 else []
+                    else:
+                        resp = client.get(f"{self.base_url}/Search", params={"q": customer_name})
+                        firms = resp.json().get("Data", []) if resp.status_code == 200 else []
+
+                    if firms:
+                        firm = firms[0]
+                        frn = str(firm.get("FRN", "")).strip()
+                        
+                        # Check firm permissions (capital /Firm/{frn}/Permissions)
+                        perm_resp = client.get(f"{self.base_url}/Firm/{frn}/Permissions")
+                        perms = perm_resp.json() if perm_resp.status_code == 200 else {}
                             
-                            # Check firm permissions
-                            perm_resp = client.get(f"{self.base_url}/Firm/{frn}/Permissions")
-                            perms = perm_resp.json() if perm_resp.status_code == 200 else {}
-                            
-                            client_money_status = perms.get("ClientMoney", {}).get("HoldsClientMoney", False)
-                            
-                            events.append({
-                                "entity_name": firm.get("Name", customer_name),
-                                "event_type": "CLIENT_MONEY_REVOCATION" if not client_money_status else "FCA_AUTHORIZATION_CHANGE",
-                                "category": "REGULATORY_CHANGE",
-                                "severity": "CRITICAL" if not client_money_status else "HIGH",
-                                "source": self.name,
-                                "raw_payload": {
-                                    "frn": frn,
-                                    "firm_status": firm.get("Status"),
-                                    "holds_client_money": client_money_status,
-                                    "wealthtek_check": "FAILED - Not authorized to hold client funds" if not client_money_status else "PASSED",
-                                    "regulator": "UK Financial Conduct Authority (FCA)"
-                                }
-                            })
-                            return events
+                        client_money_status = perms.get("ClientMoney", {}).get("HoldsClientMoney", False)
+                        
+                        events.append({
+                            "entity_name": firm.get("Name", customer_name),
+                            "event_type": "CLIENT_MONEY_REVOCATION" if not client_money_status else "FCA_AUTHORIZATION_CHANGE",
+                            "category": "REGULATORY_CHANGE",
+                            "severity": "CRITICAL" if not client_money_status else "HIGH",
+                            "source": self.name,
+                            "raw_payload": {
+                                "frn": frn,
+                                "firm_status": firm.get("Status"),
+                                "holds_client_money": client_money_status,
+                                "wealthtek_check": "FAILED - Not authorized to hold client funds" if not client_money_status else "PASSED",
+                                "regulator": "UK Financial Conduct Authority (FCA)"
+                            }
+                        })
+                        return events
             except Exception as e:
                 print(f"[FCARegisterConnector] Live API request failed ({e}). Using WealthTek check simulation payload.")
 

@@ -37,7 +37,8 @@ class CompaniesHouseConnector(BaseConnector):
                         items = data.get("items", [])
                         if items:
                             comp = items[0]
-                            comp_number = comp.get("company_number")
+                            raw_comp_number = comp.get("company_number", "")
+                            comp_number = str(raw_comp_number).strip().zfill(8)
                             comp_name = comp.get("title", customer_name)
                             
                             # Fetch officers/filings

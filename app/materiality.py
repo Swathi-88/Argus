@@ -149,29 +149,46 @@ class MaterialityGate:
             )
 
         # 3. Event Deduplication Check
-        # Exclude the current event ID from duplicate search
-        cutoff = datetime.now() - timedelta(hours=self.dedup_window_hours)
-        existing_dup = db.query(Event).filter(
-            Event.matched_customer_id == customer.id,
-            Event.category == event.category,
-            Event.id != event.id,
-            Event.created_at >= cutoff
-        ).first()
+        # Category-specific window override: SANCTIONS_MATCH has 0h window (always pass through)
+        category_dedup_hours = 0 if event.category == "SANCTIONS_MATCH" else self.dedup_window_hours
+        
+        if category_dedup_hours > 0:
+            cutoff = datetime.now() - timedelta(hours=category_dedup_hours)
+            existing_dup = db.query(Event).filter(
+                Event.matched_customer_id == customer.id,
+                Event.category == event.category,
+                Event.id != event.id,
+                Event.created_at >= cutoff
+            ).first()
 
-        if existing_dup:
-            reasons.append(f"Suppressed: Duplicate {event.category} event already processed for customer within {self.dedup_window_hours}h window.")
-            return MaterialityResult(
-                is_material=False,
-                materiality_score=0.0,
-                reasons=reasons,
-                previous_risk_score=prev_risk,
-                new_risk_score=prev_risk
-            )
-        reasons.append(f"Passed deduplication check (no duplicate {event.category} event in past {self.dedup_window_hours}h).")
+            if existing_dup:
+                reasons.append(f"Suppressed: Duplicate {event.category} event already processed for customer within {category_dedup_hours}h window.")
+                return MaterialityResult(
+                    is_material=False,
+                    materiality_score=0.0,
+                    reasons=reasons,
+                    previous_risk_score=prev_risk,
+                    new_risk_score=prev_risk
+                )
+            reasons.append(f"Passed deduplication check (no duplicate {event.category} event in past {category_dedup_hours}h).")
+        else:
+            reasons.append(f"Passed deduplication check (0h deduplication window for {event.category}).")
 
         # 4. Materiality Score Calculation
         severity_weight = self.classifier.get_severity_weight(event.category, event.severity)
         
+        # 5. Minimum Severity / Materiality Threshold Filter
+        # Low-severity routine events (routine filings, product announcements) are filtered out
+        if event.severity.upper() == "LOW" or event.event_type.upper() in ("ROUTINE_ANNOUNCEMENT", "ROUTINE_FILING"):
+            reasons.append(f"Filtered out: Event severity level ({event.severity}) is below minimum threshold for downstream risk escalation.")
+            return MaterialityResult(
+                is_material=False,
+                materiality_score=round((event.match_confidence / 100.0) * severity_weight, 2),
+                reasons=reasons,
+                previous_risk_score=prev_risk,
+                new_risk_score=prev_risk
+            )
+
         # Normalize materiality score 0 - 100
         materiality_score = round(min(100.0, (event.match_confidence / 100.0) * severity_weight * 2.0), 2)
         

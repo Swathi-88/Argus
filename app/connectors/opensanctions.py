@@ -25,7 +25,7 @@ class OpenSanctionsConnector(BaseConnector):
                 self.increment_request_count()
                 headers = {"Authorization": f"ApiKey {self.api_key}"} if self.api_key else {}
                 with self._get_client(headers=headers) as client:
-                    resp = client.get(f"{self.base_url}/entities", params={"q": customer_name, "limit": 1})
+                    resp = client.get(f"{self.base_url}/search/default", params={"q": customer_name, "limit": 1})
                     if resp.status_code == 200:
                         data = resp.json()
                         results = data.get("results", [])
