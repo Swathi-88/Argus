@@ -20,6 +20,7 @@ class Customer(Base):
 
     aliases = relationship("EntityAlias", back_populates="customer", cascade="all, delete-orphan")
     events = relationship("Event", back_populates="customer")
+    materialized_events = relationship("MaterializedEvent", back_populates="customer")
 
 class EntityAlias(Base):
     __tablename__ = "entity_aliases"
@@ -38,8 +39,9 @@ class Event(Base):
     id = Column(Integer, primary_key=True, index=True)
     entity_name = Column(String, nullable=False, index=True)
     event_type = Column(String, nullable=False)  # SANCTIONS_UPDATE, NEGATIVE_NEWS, TRANSACTION_SPIKE, etc.
+    category = Column(String, nullable=False, default="CORPORATE_CHANGE") # REGULATORY_CHANGE, SANCTIONS_MATCH, ADVERSE_MEDIA, TRANSACTION_ANOMALY, CORPORATE_CHANGE
     severity = Column(String, nullable=False)    # LOW, MEDIUM, HIGH, CRITICAL
-    source = Column(String, nullable=False)      # e.g., DowJones, Refinitiv, Internal
+    source = Column(String, nullable=False)      # e.g., UK_Companies_House, OpenSanctions, FCA_Register, NewsAPI
     raw_payload = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     
@@ -48,13 +50,33 @@ class Event(Base):
     match_method = Column(String, nullable=False, default="UNMATCHED")  # EXACT, NORMALIZED, FUZZY, UNMATCHED
 
     customer = relationship("Customer", back_populates="events")
+    materialized_event = relationship("MaterializedEvent", back_populates="event", uselist=False)
+
+class MaterializedEvent(Base):
+    __tablename__ = "materialized_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    event_id = Column(Integer, ForeignKey("events.id", ondelete="CASCADE"), nullable=False, index=True)
+    customer_id = Column(Integer, ForeignKey("customers.id", ondelete="CASCADE"), nullable=False, index=True)
+    category = Column(String, nullable=False)
+    severity = Column(String, nullable=False)
+    materiality_score = Column(Float, nullable=False)
+    decision_reasons = Column(JSON, nullable=False)
+    triggered_risk_recalculation = Column(Boolean, nullable=False, default=True)
+    previous_risk_score = Column(Float, nullable=False)
+    new_risk_score = Column(Float, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    event = relationship("Event", back_populates="materialized_event")
+    customer = relationship("Customer", back_populates="materialized_events")
 
 class AuditLog(Base):
     __tablename__ = "audit_logs"
 
     id = Column(Integer, primary_key=True, index=True)
-    entity_type = Column(String, nullable=False)  # EVENT, CUSTOMER, RESOLUTION
+    entity_type = Column(String, nullable=False)  # EVENT, CUSTOMER, RESOLUTION, MATERIALITY
     entity_id = Column(Integer, nullable=False)
-    action = Column(String, nullable=False)       # EVENT_INGESTED_AND_RESOLVED, etc.
+    action = Column(String, nullable=False)       # EVENT_INGESTED_AND_RESOLVED, EVENT_MATERIALIZED, etc.
     details = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+

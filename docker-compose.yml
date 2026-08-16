@@ -17,6 +17,18 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7-alpine
+    container_name: aml_redis
+    restart: always
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   fastapi:
     build:
       context: .
@@ -25,14 +37,19 @@ services:
     restart: always
     environment:
       DATABASE_URL: postgresql://aml_user:aml_password@postgres:5432/aml_db
+      REDIS_URL: redis://redis:6379/0
       ENVIRONMENT: development
     ports:
       - "8000:8000"
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     volumes:
       - .:/app
 
 volumes:
   postgres_data:
+  redis_data:
+

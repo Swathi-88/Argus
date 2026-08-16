@@ -8,59 +8,68 @@ from app.schemas import EventCreate, EventResponse, EventListResponse
 from app.entity_resolution import EntityResolver
 from app.config import settings
 
+from app.classifier import SignalClassifier
+from app.queue import event_queue
+from app.worker import WorkerProcess
+
 router = APIRouter(prefix="/events", tags=["Events"])
 
 resolver = EntityResolver(fuzzy_threshold=settings.FUZZY_MATCH_THRESHOLD)
+classifier = SignalClassifier()
+worker = WorkerProcess()
 
 
 @router.post("", response_model=EventResponse, status_code=status.HTTP_201_CREATED)
 def ingest_event(event_in: EventCreate, db: Session = Depends(get_db)):
     """
-    Ingests a raw incoming event, executes multi-tier entity resolution 
-    against customer records, saves the event and writes an audit log entry.
+    Ingests a raw incoming event into the Redis Streams Event Queue,
+    executes Signal Classification, Entity Resolution, and Materiality Gate processing.
     """
-    # 1. Perform Entity Resolution
-    resolution = resolver.resolve(event_in.entity_name, db)
-
-    # 2. Persist Event Record
-    event = Event(
-        entity_name=event_in.entity_name,
+    # 1. Classify Signal
+    category, severity, _ = classifier.classify(
         event_type=event_in.event_type,
-        severity=event_in.severity,
+        raw_payload=event_in.raw_payload,
         source=event_in.source,
-        raw_payload=event_in.raw_payload or {},
-        matched_customer_id=resolution.matched_customer_id,
-        match_confidence=resolution.confidence_score,
-        match_method=resolution.match_method
+        requested_category=event_in.category,
+        requested_severity=event_in.severity
     )
-    db.add(event)
-    db.commit()
-    db.refresh(event)
 
-    # 3. Create Audit Log
-    audit_details = {
+    # 2. Push event payload into Redis Streams event queue
+    payload = {
         "entity_name": event_in.entity_name,
         "event_type": event_in.event_type,
-        "severity": event_in.severity,
-        "matched_customer_id": resolution.matched_customer_id,
-        "matched_customer_name": resolution.matched_customer_name,
-        "confidence_score": resolution.confidence_score,
-        "match_method": resolution.match_method
+        "category": category,
+        "severity": severity,
+        "source": event_in.source,
+        "raw_payload": event_in.raw_payload or {}
     }
-    
-    audit_entry = AuditLog(
-        entity_type="EVENT",
-        entity_id=event.id,
-        action="EVENT_INGESTED_AND_RESOLVED",
-        details=audit_details
+    msg_id = event_queue.publish(
+        entity_name=event_in.entity_name,
+        event_type=event_in.event_type,
+        category=category,
+        severity=severity,
+        source=event_in.source,
+        raw_payload=event_in.raw_payload or {}
     )
-    db.add(audit_entry)
-    db.commit()
 
-    # 4. Format Response
+    # 3. Worker process picks up event payload and executes full pipeline
+    worker.process_event_payload(payload, db)
+
+    # 4. Fetch the created event from DB to return structured response
+    event = db.query(Event).order_by(Event.id.desc()).first()
+    if not event:
+        raise HTTPException(status_code=500, detail="Failed to save event")
+
+    cust_name = None
+    if event.matched_customer_id:
+        cust = db.query(Customer.name).filter(Customer.id == event.matched_customer_id).first()
+        if cust:
+            cust_name = cust[0]
+
     response = EventResponse.model_validate(event)
-    response.matched_customer_name = resolution.matched_customer_name
+    response.matched_customer_name = cust_name
     return response
+
 
 
 @router.get("", response_model=EventListResponse)

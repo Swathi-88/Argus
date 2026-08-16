@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.database import engine, Base, SessionLocal
 from app.seed import seed_database
-from app.routers import events, customers
+from app.routers import events, customers, connectors, materialized_events
 
 
 @asynccontextmanager
@@ -27,8 +27,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="AML/KYC Dynamic Risk Trigger Engine",
-    description="Phase 1 Prototype: Multi-tier Entity Resolution & Event Monitoring Engine",
-    version="1.0.0",
+    description="Phase 2 Engine: External Connectors, Signal Classification, Materiality Gate & Async Event Worker",
+    version="2.0.0",
     lifespan=lifespan
 )
 
@@ -44,6 +44,9 @@ app.add_middleware(
 # Register Routers
 app.include_router(events.router)
 app.include_router(customers.router)
+app.include_router(connectors.router)
+app.include_router(materialized_events.router)
+
 
 
 @app.get("/", tags=["Health"])

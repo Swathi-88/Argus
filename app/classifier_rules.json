@@ -1,0 +1,115 @@
+{
+  "categories": {
+    "SANCTIONS_MATCH": {
+      "default_severity": "CRITICAL",
+      "description": "Near-certain — sanctions lists are curated, low false-positive by design",
+      "keywords": ["sanction", "ofac", "un_list", "eu_sanctions", "block_list", "specially_designated", "sdn"]
+    },
+    "REGULATORY_CHANGE": {
+      "default_severity": "CRITICAL",
+      "description": "FCA licensing, client money (CASS) authorization changes, WealthTek replica",
+      "keywords": ["fca", "client_money", "cass", "unauthorized", "license_revoked", "enforcement", "regulatory", "fine", "penalty"]
+    },
+    "LAW_ENFORCEMENT": {
+      "default_severity": "CRITICAL",
+      "description": "Police raids, arrests, criminal charges — Stunt & Co replica",
+      "keywords": ["police", "raid", "arrest", "criminal_charge", "indictment", "law_enforcement", "warrant", "seizure"]
+    },
+    "PEP_STATUS": {
+      "default_severity": "HIGH",
+      "description": "Politically Exposed Person listing or associated link",
+      "keywords": ["pep", "politically_exposed", "government_official", "minister", "diplomat", "pep_family"]
+    },
+    "ADVERSE_MEDIA": {
+      "default_severity": "MEDIUM",
+      "description": "Negative news, financial crime allegations, media signals",
+      "keywords": ["adverse_news", "fraud", "investigation", "laundering", "bribery", "scandal", "lawsuit", "court"]
+    },
+    "TRANSACTION_ANOMALY": {
+      "default_severity": "HIGH",
+      "description": "Spikes in transaction volume/value, rapid movement of funds, statistical deviations (>4σ / IsolationForest)",
+      "keywords": ["transaction_spike", "offshore", "rapid_movement", "structuring", "unusual_volume", "isolation_forest", "sigma_deviation"]
+    },
+    "CORPORATE_CHANGE": {
+      "default_severity": "MEDIUM",
+      "description": "UBO/ownership change, director appointment/resignation, registered address update",
+      "keywords": ["ubo_change", "ownership_change", "director_resignation", "director_appointment", "registered_office", "psc_change", "companies_house"]
+    },
+    "GEOGRAPHIC_EXPOSURE": {
+      "default_severity": "MEDIUM",
+      "description": "New high-risk or low-risk jurisdiction counterparty exposure",
+      "keywords": ["high_risk_jurisdiction", "offshore_counterparty", "fatf_grey", "tax_haven", "counterparty_country"]
+    }
+  },
+  "category_severity_weights": {
+    "SANCTIONS_MATCH": {
+      "CRITICAL": 50.0,
+      "HIGH": 30.0,
+      "MEDIUM": 15.0,
+      "LOW": 5.0
+    },
+    "REGULATORY_CHANGE": {
+      "CRITICAL": 35.0,
+      "HIGH": 20.0,
+      "MEDIUM": 10.0,
+      "LOW": 3.0
+    },
+    "LAW_ENFORCEMENT": {
+      "CRITICAL": 30.0,
+      "HIGH": 15.0,
+      "MEDIUM": 8.0,
+      "LOW": 2.0
+    },
+    "PEP_STATUS": {
+      "CRITICAL": 25.0,
+      "HIGH": 12.0,
+      "MEDIUM": 6.0,
+      "LOW": 2.0
+    },
+    "ADVERSE_MEDIA": {
+      "CRITICAL": 20.0,
+      "HIGH": 10.0,
+      "MEDIUM": 4.0,
+      "LOW": 1.5
+    },
+    "TRANSACTION_ANOMALY": {
+      "CRITICAL": 20.0,
+      "HIGH": 9.0,
+      "MEDIUM": 4.0,
+      "LOW": 1.5
+    },
+    "CORPORATE_CHANGE": {
+      "CRITICAL": 15.0,
+      "HIGH": 7.0,
+      "MEDIUM": 3.0,
+      "LOW": 1.2
+    },
+    "GEOGRAPHIC_EXPOSURE": {
+      "CRITICAL": 12.0,
+      "HIGH": 8.0,
+      "MEDIUM": 5.0,
+      "LOW": 1.1
+    }
+  },
+  "event_type_mappings": {
+    "SANCTIONS_UPDATE": {"category": "SANCTIONS_MATCH", "severity": "CRITICAL"},
+    "CLIENT_MONEY_REVOCATION": {"category": "REGULATORY_CHANGE", "severity": "CRITICAL"},
+    "FCA_AUTHORIZATION_CHANGE": {"category": "REGULATORY_CHANGE", "severity": "HIGH"},
+    "POLICE_RAID": {"category": "LAW_ENFORCEMENT", "severity": "CRITICAL"},
+    "CRIMINAL_CHARGES": {"category": "LAW_ENFORCEMENT", "severity": "CRITICAL"},
+    "LAW_ENFORCEMENT_INVESTIGATION": {"category": "LAW_ENFORCEMENT", "severity": "HIGH"},
+    "PEP_LISTING": {"category": "PEP_STATUS", "severity": "HIGH"},
+    "PEP_ASSOCIATE": {"category": "PEP_STATUS", "severity": "MEDIUM"},
+    "FRAUD_ALLEGATION": {"category": "ADVERSE_MEDIA", "severity": "HIGH"},
+    "NEGATIVE_NEWS": {"category": "ADVERSE_MEDIA", "severity": "MEDIUM"},
+    "UNVERIFIED_NEWS": {"category": "ADVERSE_MEDIA", "severity": "LOW"},
+    "ISOLATION_FOREST_ANOMALY": {"category": "TRANSACTION_ANOMALY", "severity": "HIGH"},
+    "TRANSACTION_SPIKE": {"category": "TRANSACTION_ANOMALY", "severity": "HIGH"},
+    "TRANSACTION_DEVIATION": {"category": "TRANSACTION_ANOMALY", "severity": "MEDIUM"},
+    "UBO_CHANGE": {"category": "CORPORATE_CHANGE", "severity": "HIGH"},
+    "DIRECTOR_CHANGE": {"category": "CORPORATE_CHANGE", "severity": "MEDIUM"},
+    "REGISTERED_ADDRESS_CHANGE": {"category": "CORPORATE_CHANGE", "severity": "LOW"},
+    "HIGH_RISK_JURISDICTION_EXPOSURE": {"category": "GEOGRAPHIC_EXPOSURE", "severity": "MEDIUM"},
+    "LOW_RISK_JURISDICTION_EXPOSURE": {"category": "GEOGRAPHIC_EXPOSURE", "severity": "LOW"}
+  }
+}
