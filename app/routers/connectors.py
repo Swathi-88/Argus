@@ -1,5 +1,5 @@
 from typing import Optional
-from fastapi import APIRouter, Depends, Query, HTTPException, status
+from fastapi import APIRouter, Body, Depends, Query, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -13,7 +13,8 @@ worker = WorkerProcess()
 
 @router.post("/run", response_model=ConnectorRunResult)
 def run_connector(
-    request: ConnectorRunRequest,
+    request: Optional[ConnectorRunRequest] = Body(default=None),
+
     process_immediately: bool = Query(True, description="Whether worker should process queued events immediately"),
     db: Session = Depends(get_db)
 ):
@@ -22,6 +23,9 @@ def run_connector(
     fetches external risk signals matching synthetic customer records, pushes raw events into Redis Stream,
     and runs worker processing pipeline.
     """
+    if request is None:
+        request = ConnectorRunRequest()
+
     result = connector_manager.fetch_and_enqueue_all(
         db=db,
         limit_customers=request.limit_customers,

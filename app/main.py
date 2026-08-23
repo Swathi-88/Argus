@@ -2,16 +2,18 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.database import engine, Base, SessionLocal
+from app.database import engine, Base, SessionLocal, init_db_schema
 from app.seed import seed_database
-from app.routers import events, customers, connectors, materialized_events
+from app.routers import events, customers, connectors, materialized_events, alerts, anomalies
+
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup: Ensure DB tables exist and seed database
     print("[Startup] Initializing Database Schema...")
-    Base.metadata.create_all(bind=engine)
+    init_db_schema()
+
     
     print("[Startup] Triggering Data Seeder...")
     db = SessionLocal()
@@ -27,8 +29,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="AML/KYC Dynamic Risk Trigger Engine",
-    description="Phase 2 Engine: External Connectors, Signal Classification, Materiality Gate & Async Event Worker",
-    version="2.0.0",
+    description="Phase 3 Engine: Bayesian Log-Odds Scoring, IsolationForest Anomaly Detection, Tier Boundary Alerts & Explainable Risk APIs",
+    version="3.0.0",
     lifespan=lifespan
 )
 
@@ -46,6 +48,9 @@ app.include_router(events.router)
 app.include_router(customers.router)
 app.include_router(connectors.router)
 app.include_router(materialized_events.router)
+app.include_router(alerts.router)
+app.include_router(anomalies.router)
+
 
 
 

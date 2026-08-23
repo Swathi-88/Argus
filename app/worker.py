@@ -13,15 +13,13 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+from app.risk_engine import map_probability_to_tier
+
 def determine_risk_tier(score: float) -> str:
-    if score >= 80.0:
-        return "CRITICAL"
-    elif score >= 60.0:
-        return "HIGH"
-    elif score >= 35.0:
-        return "MEDIUM"
-    else:
-        return "LOW"
+    # If score is given as percentage (0-100), convert to probability (0-1)
+    prob = score / 100.0 if score > 1.0 else score
+    return map_probability_to_tier(prob)
+
 
 class WorkerProcess:
     """

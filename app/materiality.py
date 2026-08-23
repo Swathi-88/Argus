@@ -192,8 +192,21 @@ class MaterialityGate:
         # Normalize materiality score 0 - 100
         materiality_score = round(min(100.0, (event.match_confidence / 100.0) * severity_weight * 2.0), 2)
         
-        new_risk = self.calculate_new_risk(prev_risk, event.category, event.severity)
-        reasons.append(f"Material Event Confirmed: Materiality Score = {materiality_score}/100. Risk weight = {severity_weight}. Risk score updated from {prev_risk:.1f} to {new_risk:.1f}.")
+        # Calculate updated risk using Bayesian Risk Engine
+        from app.risk_engine import risk_engine
+        new_risk, new_lo, old_tier, new_tier, tier_crossed, math_expl = risk_engine.update_customer_risk(
+            customer=customer,
+            event=event,
+            db=db
+        )
+
+        reasons.append(
+            f"Material Event Confirmed: Materiality Score = {materiality_score}/100. "
+            f"Bayesian LR = {math_expl['likelihood_ratio_LR']} (Δ log-odds = +{math_expl['log_odds_addition_delta']:.4f}). "
+            f"Risk score updated from {prev_risk:.4f} [{old_tier}] to {new_risk:.4f} [{new_tier}]."
+        )
+        if tier_crossed:
+            reasons.append(f"TIER BOUNDARY ALERT GENERATED: Customer crossed tier boundary from {old_tier} to {new_tier}.")
 
         return MaterialityResult(
             is_material=True,
@@ -202,4 +215,5 @@ class MaterialityGate:
             previous_risk_score=prev_risk,
             new_risk_score=new_risk
         )
+
 

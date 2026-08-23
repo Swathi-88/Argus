@@ -21,9 +21,34 @@ engine = get_engine()
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
+def init_db_schema():
+    """
+    Ensures database tables and Phase 3 columns exist.
+    Safely adds missing columns (log_odds, actual_turnover) to SQLite if needed.
+    """
+    try:
+        from sqlalchemy import inspect, text
+        inspector = inspect(engine)
+        if "customers" in inspector.get_table_names():
+            cols = [c["name"] for c in inspector.get_columns("customers")]
+            with engine.connect() as conn:
+                if "log_odds" not in cols:
+                    print("[Database] Upgrading schema: adding 'log_odds' column to customers table...")
+                    conn.execute(text("ALTER TABLE customers ADD COLUMN log_odds FLOAT;"))
+                    conn.commit()
+                if "actual_turnover" not in cols:
+                    print("[Database] Upgrading schema: adding 'actual_turnover' column to customers table...")
+                    conn.execute(text("ALTER TABLE customers ADD COLUMN actual_turnover FLOAT DEFAULT 0.0;"))
+                    conn.commit()
+    except Exception as e:
+        print(f"[Database] Auto-migration check: {e}")
+
+    Base.metadata.create_all(bind=engine)
+
 def get_db():
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
+

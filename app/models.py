@@ -14,13 +14,16 @@ class Customer(Base):
     is_pep = Column(Boolean, nullable=False, default=False)
     is_sanctioned = Column(Boolean, nullable=False, default=False)
     onboarding_date = Column(Date, nullable=False)
-    risk_score = Column(Float, nullable=False, default=0.0)
+    risk_score = Column(Float, nullable=False, default=0.05)
     risk_tier = Column(String, nullable=False, default="LOW")  # LOW, MEDIUM, HIGH, CRITICAL
+    log_odds = Column(Float, nullable=True)
+    actual_turnover = Column(Float, nullable=False, default=0.0)
     last_updated = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     aliases = relationship("EntityAlias", back_populates="customer", cascade="all, delete-orphan")
     events = relationship("Event", back_populates="customer")
     materialized_events = relationship("MaterializedEvent", back_populates="customer")
+    alerts = relationship("Alert", back_populates="customer", cascade="all, delete-orphan")
 
 class EntityAlias(Base):
     __tablename__ = "entity_aliases"
@@ -70,13 +73,35 @@ class MaterializedEvent(Base):
     event = relationship("Event", back_populates="materialized_event")
     customer = relationship("Customer", back_populates="materialized_events")
 
+class Alert(Base):
+    __tablename__ = "alerts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    customer_id = Column(Integer, ForeignKey("customers.id", ondelete="CASCADE"), nullable=False, index=True)
+    trigger_event_id = Column(Integer, ForeignKey("events.id", ondelete="SET NULL"), nullable=True, index=True)
+    previous_tier = Column(String, nullable=False)
+    new_tier = Column(String, nullable=False)
+    previous_score = Column(Float, nullable=False)
+    new_score = Column(Float, nullable=False)
+    previous_log_odds = Column(Float, nullable=False)
+    new_log_odds = Column(Float, nullable=False)
+    status = Column(String, nullable=False, default="NEW", index=True)  # NEW, CONFIRMED, DISMISSED, ESCALATED, INFO_REQUESTED
+    recommended_action = Column(String, nullable=False)
+    breakdown = Column(JSON, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    customer = relationship("Customer", back_populates="alerts")
+    trigger_event = relationship("Event")
+
 class AuditLog(Base):
     __tablename__ = "audit_logs"
 
     id = Column(Integer, primary_key=True, index=True)
-    entity_type = Column(String, nullable=False)  # EVENT, CUSTOMER, RESOLUTION, MATERIALITY
+    entity_type = Column(String, nullable=False)  # EVENT, CUSTOMER, RESOLUTION, MATERIALITY, ALERT
     entity_id = Column(Integer, nullable=False)
-    action = Column(String, nullable=False)       # EVENT_INGESTED_AND_RESOLVED, EVENT_MATERIALIZED, etc.
+    action = Column(String, nullable=False)       # EVENT_INGESTED_AND_RESOLVED, ALERT_STATUS_UPDATED, etc.
     details = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
 

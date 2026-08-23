@@ -1,6 +1,7 @@
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
+
 
 from app.database import get_db
 from app.models import Event, Customer, AuditLog
@@ -20,11 +21,15 @@ worker = WorkerProcess()
 
 
 @router.post("", response_model=EventResponse, status_code=status.HTTP_201_CREATED)
-def ingest_event(event_in: EventCreate, db: Session = Depends(get_db)):
+def ingest_event(event_in: Optional[EventCreate] = Body(default=None), db: Session = Depends(get_db)):
+
     """
     Ingests a raw incoming event into the Redis Streams Event Queue,
     executes Signal Classification, Entity Resolution, and Materiality Gate processing.
     """
+    if event_in is None:
+        event_in = EventCreate()
+
     # 1. Classify Signal
     category, severity, _ = classifier.classify(
         event_type=event_in.event_type,

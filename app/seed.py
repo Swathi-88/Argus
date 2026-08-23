@@ -20,30 +20,23 @@ HIGH_RISK_COUNTRIES = {"KY", "VG", "PA", "AE"}
 
 CORPORATE_SUFFIXES = ["Ltd", "Limited", "Inc", "Corporation", "Corp", "LLC", "GmbH", "PLC", "Holdings", "Group", "Services"]
 
-def calculate_initial_risk(is_sanctioned: bool, is_pep: bool, industry: str, country: str) -> tuple[float, str]:
-    score = random.uniform(10.0, 35.0)
-    
-    if is_sanctioned:
-        score += 50.0
-    if is_pep:
-        score += 30.0
-    if industry in HIGH_RISK_INDUSTRIES:
-        score += 15.0
-    if country in HIGH_RISK_COUNTRIES:
-        score += 15.0
-        
-    score = min(100.0, round(score, 1))
-    
-    if score >= 80.0:
-        tier = "CRITICAL"
-    elif score >= 60.0:
-        tier = "HIGH"
-    elif score >= 35.0:
-        tier = "MEDIUM"
-    else:
-        tier = "LOW"
-        
-    return score, tier
+from app.risk_engine import PriorRiskModel, map_probability_to_tier
+
+prior_model = PriorRiskModel()
+
+def calculate_initial_risk(is_sanctioned: bool, is_pep: bool, industry: str, country: str, cust_type: str = "Corporate", turnover: float = 100000.0) -> tuple[float, float, str]:
+    dummy_cust = Customer(
+        type=cust_type,
+        country=country,
+        industry=industry,
+        expected_turnover=turnover,
+        actual_turnover=turnover,
+        is_pep=is_pep,
+        is_sanctioned=is_sanctioned
+    )
+    prob, log_odds, _ = prior_model.calculate_prior(dummy_cust)
+    tier = map_probability_to_tier(prob)
+    return prob, log_odds, tier
 
 
 def seed_database(db: Session, target_count: int = 2000):
@@ -77,12 +70,20 @@ def seed_database(db: Session, target_count: int = 2000):
         country = random.choice(COUNTRIES)
         industry = random.choice(INDUSTRIES)
         turnover = round(random.uniform(50_000, 250_000_000), 2)
+        actual_turnover = round(turnover * random.uniform(0.8, 1.2), 2)
         
         is_sanctioned = random.random() < 0.015  # 1.5% sanctioned
         is_pep = random.random() < 0.035         # 3.5% PEP
         
         onboarding_date = (start_date + timedelta(days=random.randint(0, 1800))).date()
-        risk_score, risk_tier = calculate_initial_risk(is_sanctioned, is_pep, industry, country)
+        risk_score, log_odds, risk_tier = calculate_initial_risk(
+            is_sanctioned=is_sanctioned,
+            is_pep=is_pep,
+            industry=industry,
+            country=country,
+            cust_type=cust_type,
+            turnover=turnover
+        )
 
         customer = Customer(
             name=name,
@@ -90,13 +91,16 @@ def seed_database(db: Session, target_count: int = 2000):
             country=country,
             industry=industry,
             expected_turnover=turnover,
+            actual_turnover=actual_turnover,
             is_pep=is_pep,
             is_sanctioned=is_sanctioned,
             onboarding_date=onboarding_date,
             risk_score=risk_score,
+            log_odds=log_odds,
             risk_tier=risk_tier
         )
         customers_to_create.append(customer)
+
 
     # Bulk insert customers
     db.add_all(customers_to_create)
