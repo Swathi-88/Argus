@@ -157,6 +157,16 @@ def seed_database(db: Session, target_count: int = 2000):
 # enforcement subject and carries an alias so alias matching can be shown too.
 DEMO_ENTITIES = [
     {
+        "name": "Barclays PLC",
+        "type": "Corporate",
+        "country": "GB",
+        "industry": "Banking & Finance",
+        "expected_turnover": 25_000_000_000.0,
+        "is_pep": False,
+        "is_sanctioned": False,
+        "aliases": [("Barclays Bank UK PLC", "LEGAL_ENTITY"), ("Barclays Bank", "TRADING_NAME"), ("Barclays", "SHORT_NAME")],
+    },
+    {
         "name": "WealthTek Ltd",
         "type": "Corporate",
         "country": "GB",
