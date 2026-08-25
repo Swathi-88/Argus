@@ -2,10 +2,12 @@ import pytest
 import math
 from datetime import date
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
+from app.config import settings
 from app.database import Base, get_db
+from app.db_constraints import install_audit_immutability
 from app.main import app
 from app.models import Customer, Event, MaterializedEvent, Alert, AuditLog
 from app.risk_engine import (
@@ -15,10 +17,25 @@ from app.risk_engine import (
 from app.anomaly_detector import TransactionAnomalyDetector
 
 
-# Setup Test Database
-SQLALCHEMY_DATABASE_URL = "sqlite:///./test_phase3.db"
-engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
+# These tests run against a throwaway PostgreSQL *schema* rather than SQLite.
+# SQLite is no longer an option: the audit chain serialises appends with
+# pg_advisory_xact_lock and the append-only guarantee is a Postgres trigger, so a
+# SQLite test double would exercise neither. A dedicated schema keeps the
+# destructive drop_all away from the demo data while still testing the real
+# database engine.
+TEST_SCHEMA = "test_phase3"
+
+engine = create_engine(
+    settings.DATABASE_URL,
+    # search_path is the test schema ONLY — deliberately without `public`.
+    # With public on the path, create_all's has_table check finds the real
+    # public.audit_logs, skips creating the test copy, and every write in these
+    # tests lands in the live table instead. Built-ins live in pg_catalog and are
+    # still reachable, so nothing else is lost.
+    connect_args={"options": f"-csearch_path={TEST_SCHEMA}"},
+)
 TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
 
 def override_get_db():
     db = TestingSessionLocal()
@@ -27,16 +44,29 @@ def override_get_db():
     finally:
         db.close()
 
-app.dependency_overrides[get_db] = override_get_db
+
 client = TestClient(app)
 
 
 @pytest.fixture(autouse=True)
 def setup_test_db():
-    Base.metadata.drop_all(bind=engine)
+    # The override is applied per-test and removed afterwards. Setting it at
+    # import time would leak this schema into every other test module,
+    # depending on collection order.
+    app.dependency_overrides[get_db] = override_get_db
+
+    with engine.begin() as conn:
+        conn.execute(text(f"DROP SCHEMA IF EXISTS {TEST_SCHEMA} CASCADE"))
+        conn.execute(text(f"CREATE SCHEMA {TEST_SCHEMA}"))
+
     Base.metadata.create_all(bind=engine)
+    install_audit_immutability(engine)
+
     yield
-    Base.metadata.drop_all(bind=engine)
+
+    app.dependency_overrides.pop(get_db, None)
+    with engine.begin() as conn:
+        conn.execute(text(f"DROP SCHEMA IF EXISTS {TEST_SCHEMA} CASCADE"))
 
 
 def test_prior_risk_model():
@@ -214,25 +244,54 @@ def test_fastapi_alerts_and_explanation_endpoints():
         db.commit()
         db.refresh(alert)
 
-        # 1. Test GET /alerts/queue
-        resp_q = client.get("/alerts/queue?status=NEW")
+        # The demo accounts live in the app's own schema, so authenticate
+        # against that before switching the request session to the test schema.
+        from app.auth import ROLE_ANALYST, ROLE_AUDITOR, create_access_token
+        from app.models import AnalystUser
+
+        analyst = AnalystUser(
+            id=1, username="a.chen", full_name="Amara Chen",
+            role=ROLE_ANALYST, password_hash="unused", is_active=True,
+        )
+        auditor = AnalystUser(
+            id=3, username="j.lindqvist", full_name="Jo Lindqvist",
+            role=ROLE_AUDITOR, password_hash="unused", is_active=True,
+        )
+        analyst_headers = {
+            "Authorization": f"Bearer {create_access_token(analyst)['access_token']}"
+        }
+        auditor_headers = {
+            "Authorization": f"Bearer {create_access_token(auditor)['access_token']}"
+        }
+
+        # 1. GET /alerts/queue
+        resp_q = client.get("/alerts/queue?status=NEW", headers=analyst_headers)
         assert resp_q.status_code == 200
         data_q = resp_q.json()
         assert data_q["total"] >= 1
         assert data_q["alerts"][0]["id"] == alert.id
         assert data_q["alerts"][0]["customer_name"] == "Gamma Holdings"
 
-        # 2. Test GET /customers/{id}/risk-explanation
-        resp_exp = client.get(f"/customers/{cust.id}/risk-explanation")
+        # 2. GET /customers/{id}/risk-explanation
+        resp_exp = client.get(f"/customers/{cust.id}/risk-explanation", headers=analyst_headers)
         assert resp_exp.status_code == 200
         data_exp = resp_exp.json()
         assert data_exp["customer_id"] == cust.id
         assert "onboarding_math_breakdown" in data_exp
         assert "step_by_step_math" in data_exp
 
-        # 3. Test POST /alerts/{id}/action
+        # 3. An Auditor may read the queue but must not be able to dispose of it.
+        resp_denied = client.post(
+            f"/alerts/{alert.id}/action",
+            headers=auditor_headers,
+            json={"action": "CONFIRMED"},
+        )
+        assert resp_denied.status_code == 403, "AUDITOR must not be able to act on alerts"
+
+        # 4. POST /alerts/{id}/action as the analyst
         resp_act = client.post(
             f"/alerts/{alert.id}/action",
+            headers=analyst_headers,
             json={"action": "CONFIRMED", "notes": "High risk pattern confirmed by compliance analyst."}
         )
         assert resp_act.status_code == 200
@@ -240,9 +299,127 @@ def test_fastapi_alerts_and_explanation_endpoints():
         assert data_act["status"] == "CONFIRMED"
         assert data_act["breakdown"]["analyst_notes"] == "High risk pattern confirmed by compliance analyst."
 
-        # Verify Audit Log entry
-        audit = db.query(AuditLog).filter(AuditLog.entity_type == "ALERT", AuditLog.entity_id == alert.id).first()
-        assert audit is not None
-        assert audit.action == "ALERT_ACTION_CONFIRMED"
+        # 5. Escalation needs a Manager, which the analyst is not.
+        resp_escalate = client.post(
+            f"/alerts/{alert.id}/action",
+            headers=analyst_headers,
+            json={"action": "ESCALATED"},
+        )
+        assert resp_escalate.status_code == 403, "ANALYST must not be able to escalate"
+
+        # 6. The disposition is in the audit trail, attributed and hash-chained.
+        db.expire_all()
+        audit_entry = (
+            db.query(AuditLog)
+            .filter(
+                AuditLog.entity_type == "ALERT",
+                AuditLog.entity_id == alert.id,
+                AuditLog.action == "ANALYST_ACTION_CONFIRMED",
+            )
+            .first()
+        )
+        assert audit_entry is not None
+        assert audit_entry.actor == "a.chen"
+        assert audit_entry.actor_role == ROLE_ANALYST
+        assert audit_entry.record_hash and len(audit_entry.record_hash) == 64
+
+        # The refused attempts are recorded too — a denial is evidence.
+        denials = (
+            db.query(AuditLog).filter(AuditLog.action == "PERMISSION_DENIED").count()
+        )
+        assert denials >= 2, "both refused attempts should be audited"
     finally:
         db.close()
+
+
+def test_audit_chain_is_append_only_and_tamper_evident():
+    """
+    The two independent guarantees, checked separately:
+    the trigger refuses mutation, and the hash chain detects content changes.
+    """
+    from app import audit as audit_service
+    from app.db_constraints import verify_audit_immutability
+
+    db = TestingSessionLocal()
+    try:
+        first = audit_service.record(
+            db, entity_type="SYSTEM", entity_id=0, action="SYSTEM_STARTUP",
+            details={"n": 1},
+        )
+        second = audit_service.record(
+            db, entity_type="SYSTEM", entity_id=0, action="SEED_DATABASE",
+            details={"n": 2},
+        )
+
+        # Chained: each record points at its predecessor.
+        assert first.sequence_no == 1
+        assert first.prev_hash == audit_service.GENESIS_HASH
+        assert second.sequence_no == 2
+        assert second.prev_hash == first.record_hash
+
+        result = audit_service.verify_chain(db)
+        assert result["chain_valid"] is True
+        assert result["records_verified"] == 2
+        assert result["breaks"] == []
+    finally:
+        db.close()
+
+    # UPDATE and DELETE are refused by the database, not by application code.
+    proof = verify_audit_immutability(engine)
+    assert proof["update_blocked"] is True
+    assert proof["delete_blocked"] is True
+    assert proof["enforced"] is True
+    assert "trg_audit_logs_no_update" in proof["triggers_present"]
+    assert "trg_audit_logs_no_delete" in proof["triggers_present"]
+    assert "trg_audit_logs_no_truncate" in proof["triggers_present"]
+
+
+def test_hash_chain_detects_altered_content():
+    """
+    If a record is changed beneath the trigger — a restored backup, a superuser
+    who disabled it — verification must name the record that changed.
+    """
+    from sqlalchemy.orm import Session as SqlSession
+
+    from app import audit as audit_service
+
+    db = TestingSessionLocal()
+    try:
+        audit_service.record(
+            db, entity_type="SYSTEM", entity_id=0, action="SYSTEM_STARTUP",
+            details={"original": True},
+        )
+        target_id = audit_service.record(
+            db, entity_type="SYSTEM", entity_id=0, action="SEED_DATABASE",
+            details={"original": True},
+        ).id
+        audit_service.record(
+            db, entity_type="SYSTEM", entity_id=0, action="SYSTEM_STARTUP",
+            details={"original": True},
+        )
+        assert audit_service.verify_chain(db)["chain_valid"] is True
+    finally:
+        db.close()
+
+    conn = engine.connect()
+    trans = conn.begin()
+    try:
+        conn.execute(text("ALTER TABLE audit_logs DISABLE TRIGGER trg_audit_logs_no_update"))
+        conn.execute(
+            text("UPDATE audit_logs SET action = 'ANALYST_ACTION_DISMISSED' WHERE id = :i"),
+            {"i": target_id},
+        )
+
+        scoped = SqlSession(bind=conn)
+        tampered = audit_service.verify_chain(scoped)
+        scoped.close()
+
+        assert tampered["chain_valid"] is False
+        assert any(
+            b["record_id"] == target_id and "does not match its stored hash" in b["reason"]
+            for b in tampered["breaks"]
+        ), f"expected a hash mismatch on record {target_id}, got {tampered['breaks']}"
+    finally:
+        # Always rolled back — the tamper never lands.
+        trans.rollback()
+        conn.close()

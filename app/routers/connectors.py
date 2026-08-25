@@ -2,6 +2,7 @@ from typing import Optional
 from fastapi import APIRouter, Body, Depends, Query, HTTPException, status
 from sqlalchemy.orm import Session
 
+from app.auth import P_INGEST_EVENTS, Principal, require
 from app.database import get_db
 from app.connectors.manager import ConnectorManager
 from app.worker import WorkerProcess
@@ -16,7 +17,8 @@ def run_connector(
     request: Optional[ConnectorRunRequest] = Body(default=None),
 
     process_immediately: bool = Query(True, description="Whether worker should process queued events immediately"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require(P_INGEST_EVENTS)),
 ):
     """
     Triggers external API data connectors (UK Companies House, OpenSanctions, FCA Register, NewsAPI),

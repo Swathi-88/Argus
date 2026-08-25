@@ -95,13 +95,75 @@ class Alert(Base):
     trigger_event = relationship("Event")
 
 class AuditLog(Base):
+    """
+    Append-only, hash-chained audit trail.
+
+    UPDATE, DELETE and TRUNCATE are blocked by PostgreSQL triggers installed in
+    app/db_constraints.py — the ORM cannot rewrite a row here even if asked.
+    Each record additionally carries the hash of its predecessor, so removing or
+    editing a record at the database file level breaks the chain detectably.
+    Written exclusively through app/audit.py.
+    """
     __tablename__ = "audit_logs"
 
     id = Column(Integer, primary_key=True, index=True)
-    entity_type = Column(String, nullable=False)  # EVENT, CUSTOMER, RESOLUTION, MATERIALITY, ALERT
+    # Monotonic position in the chain. Distinct from `id` so the chain stays
+    # verifiable even if the sequence backing `id` is ever reset.
+    sequence_no = Column(Integer, nullable=True, index=True)
+    entity_type = Column(String, nullable=False)  # EVENT, CUSTOMER, RESOLUTION, MATERIALITY, ALERT, AUTH, SYSTEM
     entity_id = Column(Integer, nullable=False)
+    # Denormalised so the per-customer audit trail is a single indexed read.
+    customer_id = Column(Integer, nullable=True, index=True)
     action = Column(String, nullable=False)       # EVENT_INGESTED_AND_RESOLVED, ALERT_STATUS_UPDATED, etc.
     details = Column(JSON, nullable=True)
+    # Who caused this record. "SYSTEM" for pipeline actions, a username for
+    # analyst decisions — the distinction an auditor needs.
+    actor = Column(String, nullable=True, index=True)
+    actor_role = Column(String, nullable=True)
+    prev_hash = Column(String, nullable=True)
+    record_hash = Column(String, nullable=True, index=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class AnalystUser(Base):
+    """
+    Compliance staff accounts backing JWT authentication.
+    Role is one of ANALYST, MANAGER, AUDITOR — see app/auth.py for the
+    role-to-permission matrix.
+    """
+    __tablename__ = "analyst_users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String, nullable=False, unique=True, index=True)
+    full_name = Column(String, nullable=False)
+    email = Column(String, nullable=True)
+    role = Column(String, nullable=False, default="ANALYST")
+    # PBKDF2-HMAC-SHA256, salt stored inline. Format: pbkdf2_sha256$<iters>$<salt>$<hash>
+    password_hash = Column(String, nullable=False)
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    last_login_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class EvaluationRun(Base):
+    """
+    A completed baseline-vs-engine evaluation. Persisted so the comparison
+    report is reproducible and citable rather than recomputed per page load.
+    """
+    __tablename__ = "evaluation_runs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    label = Column(String, nullable=False, default="baseline_vs_engine")
+    random_seed = Column(Integer, nullable=False, default=42)
+    num_customers = Column(Integer, nullable=False)
+    num_events = Column(Integer, nullable=False)
+    horizon_days = Column(Integer, nullable=False)
+    config = Column(JSON, nullable=False)
+    # Metric blocks: engine, baseline, entity_resolution, deltas.
+    metrics = Column(JSON, nullable=False)
+    # Pre-shaped series for the comparison charts.
+    chart_data = Column(JSON, nullable=False)
+    runtime_seconds = Column(Float, nullable=False, default=0.0)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 

@@ -8,11 +8,11 @@ services:
       POSTGRES_USER: aml_user
       POSTGRES_PASSWORD: aml_password
     ports:
-      - "5432:5432"
+      - '5432:5432'
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U aml_user -d aml_db"]
+      test: ['CMD-SHELL', 'pg_isready -U aml_user -d aml_db']
       interval: 5s
       timeout: 5s
       retries: 5
@@ -22,9 +22,9 @@ services:
     container_name: aml_redis
     restart: always
     ports:
-      - "6379:6379"
+      - '6379:6379'
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ['CMD', 'redis-cli', 'ping']
       interval: 5s
       timeout: 5s
       retries: 5
@@ -35,12 +35,16 @@ services:
       dockerfile: Dockerfile
     container_name: aml_fastapi
     restart: always
+    # .env supplies secrets and tuning; the values below are the container's
+    # own networking, which must override whatever .env says about localhost.
+    env_file:
+      - .env
     environment:
       DATABASE_URL: postgresql://aml_user:aml_password@postgres:5432/aml_db
       REDIS_URL: redis://redis:6379/0
       ENVIRONMENT: development
     ports:
-      - "8000:8000"
+      - '8000:8000'
     depends_on:
       postgres:
         condition: service_healthy
@@ -48,8 +52,36 @@ services:
         condition: service_healthy
     volumes:
       - .:/app
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -fsS http://localhost:8000/health/ready || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 40s
+
+  # Analyst console. Optional in compose — `npm run dev` from ./frontend is the
+  # faster loop on a host with a slow bind mount. Start it with:
+  #   docker compose --profile console up -d console
+  console:
+    image: node:22-alpine
+    container_name: aml_console
+    profiles: ['console']
+    working_dir: /app
+    command: sh -c "npm install --no-audit --no-fund && npm run dev -- --host 0.0.0.0"
+    environment:
+      # Read by vite.config.ts; resolves over the compose network, so the
+      # browser still only ever talks to the console's own origin.
+      VITE_API_TARGET: http://fastapi:8000
+    ports:
+      - '5173:5173'
+    depends_on:
+      fastapi:
+        condition: service_started
+    volumes:
+      - ./frontend:/app
+      - console_node_modules:/app/node_modules
 
 volumes:
   postgres_data:
   redis_data:
-
+  console_node_modules:

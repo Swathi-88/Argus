@@ -2,6 +2,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Query, HTTPException, status
 from sqlalchemy.orm import Session
 
+from app.auth import P_VIEW_CUSTOMERS, Principal, require
 from app.database import get_db
 from app.models import MaterializedEvent, Event, Customer
 from app.schemas import MaterializedEventResponse, MaterializedEventListResponse
@@ -15,7 +16,8 @@ def list_materialized_events(
     customer_id: Optional[int] = Query(None, description="Filter by customer ID"),
     category: Optional[str] = Query(None, description="Filter by event category"),
     severity: Optional[str] = Query(None, description="Filter by event severity"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require(P_VIEW_CUSTOMERS)),
 ):
     """
     Retrieves a paginated list of material events that passed the Materiality Gate
@@ -52,7 +54,11 @@ def list_materialized_events(
     )
 
 @router.get("/{event_id}", response_model=MaterializedEventResponse)
-def get_materialized_event(event_id: int, db: Session = Depends(get_db)):
+def get_materialized_event(
+    event_id: int,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require(P_VIEW_CUSTOMERS)),
+):
     """
     Retrieves detailed breakdown of a single materialized event record.
     """

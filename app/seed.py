@@ -2,7 +2,8 @@ import random
 from datetime import datetime, timedelta
 from faker import Faker
 from sqlalchemy.orm import Session
-from app.models import Customer, EntityAlias, AuditLog
+from app import audit
+from app.models import Customer, EntityAlias
 
 fake = Faker()
 
@@ -134,14 +135,137 @@ def seed_database(db: Session, target_count: int = 2000):
         db.add_all(aliases_to_create)
         db.commit()
 
-    # Log audit entry for seeding
-    audit_entry = AuditLog(
+
+    audit.record(
+        db,
         entity_type="SYSTEM",
         entity_id=0,
         action="SEED_DATABASE",
-        details={"seeded_customers": len(customers_to_create), "seeded_aliases": len(aliases_to_create)}
+        details={
+            "seeded_customers": len(customers_to_create),
+            "seeded_aliases": len(aliases_to_create),
+        },
     )
-    db.add(audit_entry)
-    db.commit()
 
     print(f"[Seed] Successfully seeded {len(customers_to_create)} customers and {len(aliases_to_create)} aliases.")
+
+
+# Named subjects for the console's Live pipeline presets. Without these, an
+# injected "WealthTek Ltd" has nothing correct to match and the resolver picks
+# the nearest synthetic name instead — which makes the flagship demo look like a
+# matching bug rather than a demonstration. Each entity mirrors a real FCA
+# enforcement subject and carries an alias so alias matching can be shown too.
+DEMO_ENTITIES = [
+    {
+        "name": "WealthTek Ltd",
+        "type": "Corporate",
+        "country": "GB",
+        "industry": "Banking & Finance",
+        "expected_turnover": 42_000_000.0,
+        "is_pep": False,
+        "is_sanctioned": False,
+        "aliases": [("WealthTek LLP", "FORMER_NAME"), ("Vertem Asset Management", "TRADING_NAME")],
+    },
+    {
+        "name": "Stunt & Co Ltd",
+        "type": "Corporate",
+        "country": "GB",
+        "industry": "Jewelry & Precious Metals",
+        "expected_turnover": 118_000_000.0,
+        "is_pep": False,
+        "is_sanctioned": False,
+        "aliases": [("Stunt and Company", "TRADING_NAME")],
+    },
+    {
+        "name": "Meridian Bullion Trading Ltd",
+        "type": "Corporate",
+        "country": "AE",
+        "industry": "Jewelry & Precious Metals",
+        "expected_turnover": 76_500_000.0,
+        "is_pep": False,
+        "is_sanctioned": False,
+        "aliases": [("Meridian Bullion DMCC", "TRADING_NAME"), ("MBT", "ACRONYM")],
+    },
+    {
+        "name": "Kestrel Offshore Holdings Ltd",
+        "type": "Corporate",
+        "country": "KY",
+        "industry": "Real Estate",
+        "expected_turnover": 31_000_000.0,
+        "is_pep": True,
+        "is_sanctioned": False,
+        "aliases": [("Kestrel Offshore Group", "TRADING_NAME")],
+    },
+    {
+        "name": "Aldgate Crypto Exchange Ltd",
+        "type": "Corporate",
+        "country": "GB",
+        "industry": "Crypto & Digital Assets",
+        "expected_turnover": 9_400_000.0,
+        "is_pep": False,
+        "is_sanctioned": False,
+        "aliases": [("Aldgate Digital", "TRADING_NAME")],
+    },
+    {
+        "name": "Northwind Freight Services Ltd",
+        "type": "Corporate",
+        "country": "GB",
+        "industry": "Logistics & Shipping",
+        "expected_turnover": 5_200_000.0,
+        "is_pep": False,
+        "is_sanctioned": False,
+        "aliases": [],
+    },
+]
+
+
+def seed_demo_entities(db: Session) -> int:
+    """
+    Creates the named demo subjects if absent. Idempotent, and never modifies an
+    existing customer — a repeated startup must not reset a risk score the demo
+    has already moved.
+    """
+    created = 0
+    for spec in DEMO_ENTITIES:
+        if db.query(Customer).filter(Customer.name == spec["name"]).first():
+            continue
+
+        prob, log_odds, tier = calculate_initial_risk(
+            is_sanctioned=spec["is_sanctioned"],
+            is_pep=spec["is_pep"],
+            industry=spec["industry"],
+            country=spec["country"],
+            cust_type=spec["type"],
+            turnover=spec["expected_turnover"],
+        )
+        customer = Customer(
+            name=spec["name"],
+            type=spec["type"],
+            country=spec["country"],
+            industry=spec["industry"],
+            expected_turnover=spec["expected_turnover"],
+            actual_turnover=spec["expected_turnover"],
+            is_pep=spec["is_pep"],
+            is_sanctioned=spec["is_sanctioned"],
+            onboarding_date=(datetime.now() - timedelta(days=900)).date(),
+            risk_score=prob,
+            log_odds=log_odds,
+            risk_tier=tier,
+        )
+        db.add(customer)
+        db.flush()  # assigns customer.id without ending the transaction
+
+        for alias_name, alias_type in spec["aliases"]:
+            db.add(
+                EntityAlias(
+                    customer_id=customer.id,
+                    alias_name=alias_name,
+                    alias_type=alias_type,
+                )
+            )
+        created += 1
+
+    if created:
+        db.commit()
+        print(f"[Seed] Created {created} named demo entities for the Live pipeline presets.")
+    return created

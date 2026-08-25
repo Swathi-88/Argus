@@ -2,6 +2,7 @@ from typing import Dict, Any, List
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
+from app.auth import P_INGEST_EVENTS, Principal, require
 from app.database import get_db
 from app.models import Customer, Event, MaterializedEvent
 from app.schemas import TransactionAnomalyRequest, TransactionAnomalyResponse
@@ -15,7 +16,8 @@ router = APIRouter(prefix="/anomalies", tags=["Transaction Anomaly Detection"])
 @router.post("/detect", response_model=TransactionAnomalyResponse, summary="Detect anomalies in customer transaction stream")
 def detect_transaction_anomalies(
     req: TransactionAnomalyRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require(P_INGEST_EVENTS)),
 ):
     customer = db.query(Customer).filter(Customer.id == req.customer_id).first()
     if not customer:
@@ -44,7 +46,13 @@ def detect_transaction_anomalies(
     for ev_id in res.get("event_ids_created", []):
         event = db.query(Event).filter(Event.id == ev_id).first()
         if event:
-            mat_res = gate.evaluate(event=event, customer=customer, db=db)
+            mat_res = gate.evaluate(
+                event=event,
+                customer=customer,
+                db=db,
+                actor=principal.username,
+                actor_role=principal.role,
+            )
             if mat_res.is_material:
                 materialized_count += 1
                 mat_event = MaterializedEvent(

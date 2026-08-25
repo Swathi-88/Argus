@@ -1,9 +1,11 @@
 import pytest
 from datetime import datetime, timedelta
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
+from app.config import settings
 from app.database import Base
+from app.db_constraints import install_audit_immutability
 from app.models import Customer, Event, MaterializedEvent, AuditLog
 from app.classifier import SignalClassifier
 from app.materiality import MaterialityGate
@@ -16,15 +18,31 @@ from app.queue import event_queue
 from app.worker import WorkerProcess
 from app.seed import calculate_initial_risk
 
-# Use in-memory SQLite for testing
-TEST_DATABASE_URL = "sqlite:///:memory:"
+# A throwaway PostgreSQL schema, not SQLite: the worker pipeline under test
+# writes hash-chained audit records, and the chain serialises appends with
+# pg_advisory_xact_lock. On SQLite that function does not exist, so an in-memory
+# double would fail on the very behaviour these tests exist to cover.
+TEST_SCHEMA = "test_phase2"
+
 
 @pytest.fixture
 def db_session():
-    engine = create_engine(TEST_DATABASE_URL, connect_args={"check_same_thread": False})
+    engine = create_engine(
+        settings.DATABASE_URL,
+        # Test schema only — with `public` also on the path, create_all would
+        # find the live tables, skip creating the test copies, and these tests
+        # would write into the demo database.
+        connect_args={"options": f"-csearch_path={TEST_SCHEMA}"},
+    )
     TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+    with engine.begin() as conn:
+        conn.execute(text(f"DROP SCHEMA IF EXISTS {TEST_SCHEMA} CASCADE"))
+        conn.execute(text(f"CREATE SCHEMA {TEST_SCHEMA}"))
+
     Base.metadata.create_all(bind=engine)
-    
+    install_audit_immutability(engine)
+
     db = TestingSessionLocal()
     
     # Create sample synthetic test customers
@@ -60,9 +78,13 @@ def db_session():
     db.commit()
     
     yield db
-    
+
     db.close()
-    Base.metadata.drop_all(bind=engine)
+    # Dropping the schema is cleaner than drop_all here: the audit triggers and
+    # their function live in the schema too, and CASCADE takes the lot.
+    with engine.begin() as conn:
+        conn.execute(text(f"DROP SCHEMA IF EXISTS {TEST_SCHEMA} CASCADE"))
+    engine.dispose()
 
 
 # --- 1. Signal Classifier Tests ---

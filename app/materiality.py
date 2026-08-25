@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta
-from typing import List, Tuple, Optional, Dict, Any
+from typing import Callable, List, Tuple, Optional, Dict, Any
 from dataclasses import dataclass
 from sqlalchemy.orm import Session
 
@@ -14,6 +14,17 @@ class MaterialityResult:
     reasons: List[str]
     previous_risk_score: float
     new_risk_score: float
+    # Populated only when the event was material and scored. Lets a caller
+    # distinguish "reassessed" from "reassessed and alerted" without re-deriving
+    # the alert rule.
+    tier_crossed: bool = False
+    alert_generated: bool = False
+    previous_tier: Optional[str] = None
+    new_tier: Optional[str] = None
+    log_odds_delta: Optional[float] = None
+    likelihood_ratio: Optional[float] = None
+    # Short machine-readable cause when is_material is False, for error analysis.
+    suppression_cause: Optional[str] = None
 
 class MaterialityGate:
     """
@@ -29,11 +40,17 @@ class MaterialityGate:
     def __init__(
         self,
         confidence_threshold: float = settings.MATERIALITY_CONFIDENCE_THRESHOLD,
-        dedup_window_hours: int = settings.DEDUPLICATION_WINDOW_HOURS
+        dedup_window_hours: int = settings.DEDUPLICATION_WINDOW_HOURS,
+        duplicate_lookup: Optional[Callable[[int, str, datetime, int], bool]] = None,
     ):
         self.confidence_threshold = confidence_threshold
         self.dedup_window_hours = dedup_window_hours
         self.classifier = SignalClassifier()
+        # Injectable so the deduplication check can be answered from an
+        # in-memory index instead of a query. The evaluation harness supplies
+        # one; production leaves it None and the DB query below is used. Signature:
+        # (customer_id, category, cutoff, exclude_event_id) -> bool.
+        self.duplicate_lookup = duplicate_lookup
 
     def is_category_relevant(self, customer: Customer, category: str, event_type: str, raw_payload: Optional[Dict[str, Any]]) -> Tuple[bool, str]:
         """
@@ -99,22 +116,47 @@ class MaterialityGate:
         self,
         event: Event,
         customer: Optional[Customer],
-        db: Session
+        db: Session,
+        actor: str = "SYSTEM",
+        actor_role: str = "SYSTEM",
+        persist: bool = True,
+        on_decision: Optional[Callable[[bool, float, List[str], Optional[str]], None]] = None,
     ) -> MaterialityResult:
         """
         Main Materiality Gate evaluation routine.
+
+        `actor` / `actor_role` are threaded down to the risk engine so the
+        RISK_SCORE_UPDATED and ALERT_GENERATED audit records name whoever caused
+        the ingestion.
+
+        `on_decision` is invoked the moment materiality has been decided and
+        *before* any scoring happens, with
+        (is_material, materiality_score, reasons, suppression_cause).
+        The worker uses it to write the MATERIALITY_DECISION audit record at the
+        right point in the chain — recording the decision after the score it
+        caused would make the audit trail read backwards.
         """
         reasons = []
+
+        def decided(
+            is_material: bool,
+            materiality_score: float,
+            cause: Optional[str] = None,
+        ) -> None:
+            if on_decision is not None:
+                on_decision(is_material, materiality_score, list(reasons), cause)
 
         # 0. Unmatched customer check
         if not customer or not event.matched_customer_id:
             reasons.append("Unmatched entity: Event could not be mapped to any customer record with sufficient confidence.")
+            decided(False, 0.0, "UNMATCHED_ENTITY")
             return MaterialityResult(
                 is_material=False,
                 materiality_score=0.0,
                 reasons=reasons,
                 previous_risk_score=0.0,
-                new_risk_score=0.0
+                new_risk_score=0.0,
+                suppression_cause="UNMATCHED_ENTITY",
             )
 
         prev_risk = customer.risk_score or 0.0
@@ -122,12 +164,14 @@ class MaterialityGate:
         # 1. Match Confidence Check
         if event.match_confidence < self.confidence_threshold:
             reasons.append(f"Match confidence ({event.match_confidence:.1f}%) is below materiality threshold ({self.confidence_threshold:.1f}%).")
+            decided(False, round(event.match_confidence, 2), "LOW_MATCH_CONFIDENCE")
             return MaterialityResult(
                 is_material=False,
                 materiality_score=round(event.match_confidence, 2),
                 reasons=reasons,
                 previous_risk_score=prev_risk,
-                new_risk_score=prev_risk
+                new_risk_score=prev_risk,
+                suppression_cause="LOW_MATCH_CONFIDENCE",
             )
         reasons.append(f"Entity match confidence passed ({event.match_confidence:.1f}% >= {self.confidence_threshold:.1f}%).")
 
@@ -140,12 +184,14 @@ class MaterialityGate:
         )
         reasons.append(domain_msg)
         if not is_relevant:
+            decided(False, 0.0, "CATEGORY_NOT_DOMAIN_RELEVANT")
             return MaterialityResult(
                 is_material=False,
                 materiality_score=0.0,
                 reasons=reasons,
                 previous_risk_score=prev_risk,
-                new_risk_score=prev_risk
+                new_risk_score=prev_risk,
+                suppression_cause="CATEGORY_NOT_DOMAIN_RELEVANT",
             )
 
         # 3. Event Deduplication Check
@@ -153,22 +199,33 @@ class MaterialityGate:
         category_dedup_hours = 0 if event.category == "SANCTIONS_MATCH" else self.dedup_window_hours
         
         if category_dedup_hours > 0:
-            cutoff = datetime.now() - timedelta(hours=category_dedup_hours)
-            existing_dup = db.query(Event).filter(
-                Event.matched_customer_id == customer.id,
-                Event.category == event.category,
-                Event.id != event.id,
-                Event.created_at >= cutoff
-            ).first()
+            # Anchored to the event's own timestamp, not wall clock, so replaying
+            # a historical stream deduplicates against its own timeline.
+            reference = event.created_at or datetime.now()
+            cutoff = reference - timedelta(hours=category_dedup_hours)
+
+            if self.duplicate_lookup is not None:
+                existing_dup = self.duplicate_lookup(
+                    customer.id, event.category, cutoff, event.id or -1
+                )
+            else:
+                existing_dup = db.query(Event).filter(
+                    Event.matched_customer_id == customer.id,
+                    Event.category == event.category,
+                    Event.id != event.id,
+                    Event.created_at >= cutoff
+                ).first()
 
             if existing_dup:
                 reasons.append(f"Suppressed: Duplicate {event.category} event already processed for customer within {category_dedup_hours}h window.")
+                decided(False, 0.0, "DEDUPLICATED")
                 return MaterialityResult(
                     is_material=False,
                     materiality_score=0.0,
                     reasons=reasons,
                     previous_risk_score=prev_risk,
-                    new_risk_score=prev_risk
+                    new_risk_score=prev_risk,
+                    suppression_cause="DEDUPLICATED",
                 )
             reasons.append(f"Passed deduplication check (no duplicate {event.category} event in past {category_dedup_hours}h).")
         else:
@@ -181,23 +238,32 @@ class MaterialityGate:
         # Low-severity routine events (routine filings, product announcements) are filtered out
         if event.severity.upper() == "LOW" or event.event_type.upper() in ("ROUTINE_ANNOUNCEMENT", "ROUTINE_FILING"):
             reasons.append(f"Filtered out: Event severity level ({event.severity}) is below minimum threshold for downstream risk escalation.")
+            decided(False, round((event.match_confidence / 100.0) * severity_weight, 2), "BELOW_SEVERITY_THRESHOLD")
             return MaterialityResult(
                 is_material=False,
                 materiality_score=round((event.match_confidence / 100.0) * severity_weight, 2),
                 reasons=reasons,
                 previous_risk_score=prev_risk,
-                new_risk_score=prev_risk
+                new_risk_score=prev_risk,
+                suppression_cause="BELOW_SEVERITY_THRESHOLD",
             )
 
         # Normalize materiality score 0 - 100
         materiality_score = round(min(100.0, (event.match_confidence / 100.0) * severity_weight * 2.0), 2)
         
+        # The event is material. Record that decision before scoring, so the
+        # audit chain reads decision-then-consequence.
+        decided(True, materiality_score, None)
+
         # Calculate updated risk using Bayesian Risk Engine
         from app.risk_engine import risk_engine
         new_risk, new_lo, old_tier, new_tier, tier_crossed, math_expl = risk_engine.update_customer_risk(
             customer=customer,
             event=event,
-            db=db
+            db=db,
+            actor=actor,
+            actor_role=actor_role,
+            persist=persist,
         )
 
         reasons.append(
@@ -213,7 +279,13 @@ class MaterialityGate:
             materiality_score=materiality_score,
             reasons=reasons,
             previous_risk_score=prev_risk,
-            new_risk_score=new_risk
+            new_risk_score=new_risk,
+            tier_crossed=tier_crossed,
+            alert_generated=bool(math_expl.get("alert_generated")),
+            previous_tier=old_tier,
+            new_tier=new_tier,
+            log_odds_delta=math_expl.get("log_odds_addition_delta"),
+            likelihood_ratio=math_expl.get("likelihood_ratio_LR"),
         )
 
 

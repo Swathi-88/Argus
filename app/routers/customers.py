@@ -3,9 +3,16 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session, joinedload
 
+from app.auth import P_VIEW_CUSTOMERS, Principal, require
 from app.database import get_db
 from app.models import Customer
-from app.schemas import CustomerResponse, CustomerListResponse, RiskExplanationResponse
+from app.schemas import (
+    CustomerResponse,
+    CustomerListResponse,
+    RiskExplanationResponse,
+    RiskTimelinePoint,
+    RiskTimelineResponse,
+)
 
 
 router = APIRouter(prefix="/customers", tags=["Customers"])
@@ -19,7 +26,8 @@ def list_customers(
     is_pep: Optional[bool] = Query(None, description="Filter by PEP status"),
     is_sanctioned: Optional[bool] = Query(None, description="Filter by Sanctions status"),
     search: Optional[str] = Query(None, description="Search term for name, country, or industry"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require(P_VIEW_CUSTOMERS)),
 ):
     """
     Retrieves a paginated list of customers with optional filters.
@@ -52,7 +60,11 @@ def list_customers(
 
 
 @router.get("/{customer_id}", response_model=CustomerResponse)
-def get_customer(customer_id: int, db: Session = Depends(get_db)):
+def get_customer(
+    customer_id: int,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require(P_VIEW_CUSTOMERS)),
+):
     """
     Retrieves a single customer profile by ID, including entity aliases.
     """
@@ -66,7 +78,11 @@ def get_customer(customer_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/{customer_id}/risk-explanation", response_model=RiskExplanationResponse)
-def get_customer_risk_explanation(customer_id: int, db: Session = Depends(get_db)):
+def get_customer_risk_explanation(
+    customer_id: int,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require(P_VIEW_CUSTOMERS)),
+):
     """
     Retrieves full human-readable and structured mathematical explanation of how a customer's risk score was reached.
     Includes onboarding prior calculation, event-by-event log-odds contributions, cumulative probabilities, and recommended action.
@@ -151,5 +167,106 @@ def get_customer_risk_explanation(customer_id: int, db: Session = Depends(get_db
         event_history=event_history,
         step_by_step_math=step_by_step_math,
         recommendation=rec_action
+    )
+
+
+# Tier boundaries, published so the chart draws its bands from the engine's
+# thresholds rather than a duplicated copy in the frontend.
+TIER_THRESHOLDS = {"MEDIUM": 0.20, "HIGH": 0.50, "CRITICAL": 0.80}
+
+
+@router.get(
+    "/{customer_id}/risk-timeline",
+    response_model=RiskTimelineResponse,
+    summary="Risk score evolution over time",
+)
+def get_customer_risk_timeline(
+    customer_id: int,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require(P_VIEW_CUSTOMERS)),
+):
+    """
+    The series behind the investigation page's line chart.
+
+    Point 0 is the onboarding prior, timestamped at the onboarding date. Each
+    subsequent point is one materialized event, carrying the likelihood ratio and
+    the log-odds step that moved the score — so the chart and the "why" panel are
+    reading the same numbers.
+    """
+    from datetime import datetime, time, timezone
+
+    from app.models import Event, MaterializedEvent
+    from app.risk_engine import log_odds_to_probability, map_probability_to_tier, risk_engine
+
+    customer = db.query(Customer).filter(Customer.id == customer_id).first()
+    if not customer:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Customer with ID {customer_id} not found.",
+        )
+
+    prior_p, prior_lo, _ = risk_engine.calculate_prior(customer)
+
+    onboarding_ts = (
+        datetime.combine(customer.onboarding_date, time.min, tzinfo=timezone.utc)
+        if customer.onboarding_date
+        else datetime.now(timezone.utc)
+    )
+
+    points = [
+        RiskTimelinePoint(
+            sequence=0,
+            timestamp=onboarding_ts,
+            log_odds=prior_lo,
+            risk_score=prior_p,
+            risk_tier=map_probability_to_tier(prior_p),
+            label="Onboarding prior",
+        )
+    ]
+
+    # One join instead of a per-event lookup.
+    rows = (
+        db.query(MaterializedEvent, Event)
+        .join(Event, MaterializedEvent.event_id == Event.id)
+        .filter(MaterializedEvent.customer_id == customer_id)
+        .order_by(MaterializedEvent.created_at.asc())
+        .all()
+    )
+
+    running_lo = prior_lo
+    for idx, (mat_event, event) in enumerate(rows, start=1):
+        lr, _ = risk_engine.get_likelihood_ratio(
+            mat_event.category, mat_event.severity, event.event_type
+        )
+        delta = round(math.log(lr), 4)
+        running_lo = round(running_lo + delta, 4)
+        running_p = round(log_odds_to_probability(running_lo), 4)
+
+        points.append(
+            RiskTimelinePoint(
+                sequence=idx,
+                timestamp=mat_event.created_at,
+                log_odds=running_lo,
+                risk_score=running_p,
+                risk_tier=map_probability_to_tier(running_p),
+                event_id=event.id,
+                event_type=event.event_type,
+                event_category=mat_event.category,
+                event_severity=mat_event.severity,
+                likelihood_ratio=lr,
+                log_odds_delta=delta,
+                label=f"{event.event_type} ({mat_event.severity})",
+            )
+        )
+
+    return RiskTimelineResponse(
+        customer_id=customer.id,
+        customer_name=customer.name,
+        current_risk_score=customer.risk_score or prior_p,
+        current_risk_tier=customer.risk_tier or map_probability_to_tier(prior_p),
+        current_log_odds=customer.log_odds if customer.log_odds is not None else prior_lo,
+        onboarding_date=customer.onboarding_date,
+        points=points,
+        tier_thresholds=TIER_THRESHOLDS,
     )
 

@@ -2,7 +2,8 @@ import math
 from typing import Dict, Any, Tuple, Optional, List
 from sqlalchemy.orm import Session
 
-from app.models import Customer, Event, Alert, AuditLog
+from app import audit
+from app.models import Customer, Event, Alert
 
 
 HIGH_RISK_INDUSTRIES = {
@@ -234,12 +235,22 @@ class BayesianRiskEngine:
         self,
         customer: Customer,
         event: Event,
-        db: Session
+        db: Session,
+        actor: str = "SYSTEM",
+        actor_role: str = "SYSTEM",
+        persist: bool = True,
     ) -> Tuple[float, float, str, str, bool, Dict[str, Any]]:
         """
         Updates customer running log-odds and risk probability upon a new materialized event.
         Checks for tier boundary crossing and generates an explainable Alert record if triggered.
-        
+
+        With `persist=False` the arithmetic runs identically but nothing is
+        written — no commit, no Alert row, no audit record. The evaluation
+        harness uses this to score 5,000 events through the real scoring path
+        without depending on, or polluting, the live tables. The returned
+        explanation still reports `alert_generated`, so a caller can tell what
+        would have been raised.
+
         Returns:
             (new_prob, new_log_odds, old_tier, new_tier, tier_crossed, math_explanation)
         """
@@ -292,9 +303,44 @@ class BayesianRiskEngine:
         customer.risk_score = new_prob
         customer.risk_tier = new_tier
 
+        should_create_alert = tier_crossed or (
+            event.severity and event.severity.upper() in ("CRITICAL", "HIGH")
+        )
+        math_explanation["alert_generated"] = bool(should_create_alert)
+
+        if not persist:
+            # Scoring-only path used by the evaluation harness.
+            return new_prob, new_log_odds, old_tier, new_tier, tier_crossed, math_explanation
+
+        db.commit()
+
+        # --- Audit: the score movement, with the arithmetic that produced it ---
+        audit.record(
+            db,
+            entity_type="CUSTOMER",
+            entity_id=customer.id,
+            customer_id=customer.id,
+            action="RISK_SCORE_UPDATED",
+            actor=actor,
+            actor_role=actor_role,
+            details={
+                "trigger_event_id": event.id,
+                "previous_log_odds": prev_log_odds,
+                "new_log_odds": new_log_odds,
+                "previous_score": prev_prob,
+                "new_score": new_prob,
+                "previous_tier": old_tier,
+                "new_tier": new_tier,
+                "tier_boundary_crossed": tier_crossed,
+                "likelihood_ratio": lr,
+                "log_odds_delta": round(delta_log_odds, 4),
+                "lr_selection_rule": lr_reason,
+                "formula": math_explanation["formula_log_odds"],
+            },
+        )
+
         # 6. If tier boundary crossed or event is HIGH/CRITICAL severity, generate Alert record!
         alert_record = None
-        should_create_alert = tier_crossed or (event.severity and event.severity.upper() in ("CRITICAL", "HIGH"))
         if should_create_alert:
             rec_action = get_recommended_action(new_tier)
             alert_record = Alert(
@@ -314,24 +360,30 @@ class BayesianRiskEngine:
             db.commit()
             db.refresh(alert_record)
 
-
-            # Log audit entry
-            audit_alert = AuditLog(
+            # --- Audit: the alert, and why it fired ---
+            audit.record(
+                db,
                 entity_type="ALERT",
                 entity_id=alert_record.id,
-                action="TIER_BOUNDARY_ALERT_CREATED",
+                customer_id=customer.id,
+                action="ALERT_GENERATED",
+                actor=actor,
+                actor_role=actor_role,
                 details={
-                    "customer_id": customer.id,
+                    "alert_id": alert_record.id,
                     "customer_name": customer.name,
                     "trigger_event_id": event.id,
+                    "trigger_event_type": event.event_type,
                     "transition": f"{old_tier} -> {new_tier}",
                     "previous_score": prev_prob,
                     "new_score": new_prob,
-                    "recommended_action": rec_action
-                }
+                    "trigger_reason": (
+                        "TIER_BOUNDARY_CROSSED" if tier_crossed
+                        else f"HIGH_SEVERITY_EVENT_{event.severity}"
+                    ),
+                    "recommended_action": rec_action,
+                },
             )
-            db.add(audit_alert)
-            db.commit()
 
         return new_prob, new_log_odds, old_tier, new_tier, tier_crossed, math_explanation
 
